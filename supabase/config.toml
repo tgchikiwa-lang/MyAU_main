@@ -1,0 +1,4 @@
+project_id = "mrkgziygjbknujsesvta"
+
+[functions.alumni-access]
+verify_jwt = false
