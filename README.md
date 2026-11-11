@@ -3,8 +3,9 @@
 1. In Supabase SQL Editor, run `backend/migrations/0008_records_verification_finance.sql`,
    `backend/migrations/0009_result_verification.sql`, `backend/migrations/0010_recommendation_letters.sql`,
    `backend/migrations/0011_lecturer_sharing_and_achievement_history.sql`,
-   `backend/migrations/0012_official_results_scoped_verifiers_alumni.sql`, and
-   `backend/migrations/0013_queue_unmatched_alumni_requests.sql`, in that order. Migration 0008
+   `backend/migrations/0012_official_results_scoped_verifiers_alumni.sql`,
+   `backend/migrations/0013_queue_unmatched_alumni_requests.sql`, and
+   `backend/migrations/0014_disambiguate_alumni_email.sql`, in that order. Migration 0008
    assumes migration 0007 and existing owner-scoped `profiles` policies are installed.
 2. The supplied images `assets/images/au_1.jpg` and `assets/images/au_3.jpg` are used for login backgrounds
    and the homepage hero, respectively.
