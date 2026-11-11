@@ -6,7 +6,7 @@ const navItems = [
   ["overview", "Overview"], ["projects", "My Projects"], ["skills", "My Skills"],
   ["academics", "Academics & Certificates"], ["results", "Official Results"],
   ["finance", "Finance"], ["references", "Recommendations"], ["clubs", "Clubs & Activities"],
-  ["professional", "Professional Profile"], ["security", "Account Security"]
+  ["professional", "Professional Profile"], ["security", "Account Security"]["privacy_centre", "Privacy Centre"]
 ];
 const pages = {
   overview: ["Overview", "Your Africa University student profile", "Your digital student ID and details in one place."],
@@ -18,7 +18,10 @@ const pages = {
   references: ["Recommendations", "Request a recommendation", "Ask a lecturer or supervisor for a recommendation. The request goes to the Records Office, who coordinate it with your referee."],
   clubs: ["Clubs & Activities", "Share your university community involvement", "Add clubs, associations and activities, with pictures."],
   professional: ["Professional Profile", "Prepare your professional profile and CV", "Link your GitHub and LinkedIn, and keep your CV ready to download."],
-  security: ["Account Security", "Manage your account and profile backup", "Keep your account secure and export a backup of your profile."],
+  security: ["Account Security", "Manage your account and profile backup", "Keep your account secure and export a backup of your profile."],"privacy_centre": [
+    "Privacy Centre", 
+    "Data Security & Privacy Centre", 
+    "Monitor who views your student records, track active permission grants, and revoke access."],
   admin: ["Student accounts", "Administration", "Administrator console."],
   "admin-profile": ["Administrator profile", "Administration", "Administrator profile access requires the protected server functions."],
   staff: ["Records Office", "Account and student record requests", "Records Office console."],
