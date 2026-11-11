@@ -994,6 +994,68 @@ function renderAuth() {
   box.querySelector("form").addEventListener("submit", authSubmit);
 }
 
+function renderStudentVerification() {
+  const box = $("[data-auth]");
+  if (!box) return;
+
+  box.innerHTML = `
+    <p class="eyebrow">Two-step verification</p>
+    <h1>Verify your email</h1>
+    <p class="lead">
+      Enter the six-digit code sent to your email address.
+    </p>
+    <form class="auth-form" id="student-verification-form">
+      <label>
+        Verification code
+        <input
+          name="code"
+          type="text"
+          inputmode="numeric"
+          autocomplete="one-time-code"
+          pattern="[0-9]{6}"
+          maxlength="6"
+          required
+        >
+      </label>
+      <button class="button" type="submit">Verify and continue</button>
+      <p class="form-message" aria-live="polite"></p>
+    </form>
+  `;
+
+  $("#student-verification-form").addEventListener(
+    "submit",
+    verifyStudentLogin
+  );
+}
+
+async function verifyStudentLogin(event) {
+  event.preventDefault();
+
+  const form = event.currentTarget;
+  const msg = $(".form-message", form);
+  const code = new FormData(form).get("code").trim();
+
+  msg.textContent = "Checking verification code...";
+
+  try {
+    const client = await getSupabase();
+
+    const { data, error } = await client.functions.invoke(
+      "student-login-verify",
+      { body: { action: "verify", code } }
+    );
+
+    if (error) throw error;
+    if (data?.error) throw new Error(data.error);
+
+    window.location.assign(nextStudentPage());
+  } catch (error) {
+    msg.textContent = error instanceof Error
+      ? error.message
+      : "Verification failed. Please try again.";
+  }
+}
+
 function nextStudentPage() {
   const requested = new URLSearchParams(location.search).get("next");
   return studentKeys.has(requested?.replace(/\.html$/, "")) ? requested.replace(/\.html$/, "") + ".html" : "overview.html";
@@ -1009,12 +1071,29 @@ async function authSubmit(event) {
   try {
     const client = await getSupabase();
     let result;
-    if (key === "auth") {
-      result = await client.auth.signInWithPassword({ email: data.email, password: data.password });
-      if (!result.error) {
-        window.location.assign(nextStudentPage());
-        return;
-      }
+    
+if (key === "auth") {
+  result = await client.auth.signInWithPassword({
+    email: data.email,
+    password: data.password
+  });
+
+  if (!result.error) {
+    const { data: verification, error: verificationError } =
+      await client.functions.invoke("student-login-verify", {
+        body: { action: "send" }
+      });
+
+    if (verificationError) throw verificationError;
+    if (verification?.error) {
+      throw new Error(verification.error);
+    }
+
+    renderStudentVerification();
+    return;
+  }
+}
+
     } else if (key === "signup") {
       result = await client.auth.signUp({ email: data.email, password: data.password, options: { data: { name: data.name, student_id: data.studentId }, emailRedirectTo: `${location.origin}/pages/auth.html` } });
     } else if (key === "forgot-password") {
