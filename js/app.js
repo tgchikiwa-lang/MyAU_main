@@ -1071,36 +1071,44 @@ async function authSubmit(event) {
   try {
     const client = await getSupabase();
     let result;
-    
-if (key === "auth") {
-  result = await client.auth.signInWithPassword({
-    email: data.email,
-    password: data.password
-  });
 
-  if (!result.error) {
-    const { data: verification, error: verificationError } =
-      await client.functions.invoke("student-login-verify", {
-        body: { action: "send" }
+    if (key === "auth") {
+      result = await client.auth.signInWithPassword({
+        email: data.email,
+        password: data.password
       });
 
-    if (verificationError) throw verificationError;
-    if (verification?.error) {
-      throw new Error(verification.error);
-    }
+      if (!result.error) {
+        const { data: verification, error: verificationError } =
+          await client.functions.invoke("student-login-verify", {
+            body: { action: "send" }
+          });
 
-    renderStudentVerification();
-    return;
-  }
-}
+        if (verificationError) throw verificationError;
+        if (verification?.error) {
+          throw new Error(verification.error);
+        }
 
+        renderStudentVerification();
+        return;
+      }
     } else if (key === "signup") {
-      result = await client.auth.signUp({ email: data.email, password: data.password, options: { data: { name: data.name, student_id: data.studentId }, emailRedirectTo: `${location.origin}/pages/auth.html` } });
+      result = await client.auth.signUp({
+        email: data.email,
+        password: data.password,
+        options: {
+          data: { name: data.name, student_id: data.studentId },
+          emailRedirectTo: `${location.origin}/pages/auth.html`
+        }
+      });
     } else if (key === "forgot-password") {
-      result = await client.auth.resetPasswordForEmail(data.email, { redirectTo: `${location.origin}/pages/reset-password.html` });
+      result = await client.auth.resetPasswordForEmail(data.email, {
+        redirectTo: `${location.origin}/pages/reset-password.html`
+      });
     } else {
       result = await client.auth.updateUser({ password: data.password });
     }
+
     if (result.error) throw result.error;
     msg.textContent = key === "signup"
       ? `Registration submitted for ${data.email}. If email confirmation is enabled, check this inbox (including spam) for the confirmation message.`
