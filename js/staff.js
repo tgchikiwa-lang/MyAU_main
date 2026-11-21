@@ -448,11 +448,23 @@
     const { data, error } = await q;
     if (error) throw error;
     const rows = data || [];
+    let provenanceByVerification = new Map();
+    if (rows.some(row => row.item_type === "achievement")) {
+      const { data: provenance, error: provenanceError } = await client
+        .from("iads_achievement_provenance").select("verification_id,source_url")
+        .in("verification_id", rows.filter(row => row.item_type === "achievement").map(row => row.id));
+      if (provenanceError && !AU.tableMissing(provenanceError)) throw provenanceError;
+      provenanceByVerification = new Map((provenance || []).map(item => [item.verification_id, item.source_url]));
+    }
+    const displayRows = rows.map(row => ({
+      ...row,
+      iads_source_url: provenanceByVerification.get(row.id) || null,
+    }));
     body.innerHTML = `<div class="toolbar"><label>Show<select data-filter>${["pending", "verified", "rejected", "all"].map(f => `<option value="${f}"${f === filter ? " selected" : ""}>${f === "rejected" ? "Not verified" : f[0].toUpperCase() + f.slice(1)}</option>`).join("")}</select></label><button class="button ghost small" type="button" data-refresh>Refresh</button></div>
     <p class="muted">${verifierAssignment
       ? `You can review only your assigned students (${verifierAssignment.allowed_student_ids.length}) and categories (${safe(verifierAssignment.allowed_item_types.join(", "))}).`
       : "Check each item against the evidence, then confirm it is true or mark it as not verified. Students see your decision on their profile."}</p>
-    <div class="queue">${rows.length ? rows.map(verifyCard).join("") : '<div class="empty">Nothing to show here.</div>'}</div>`;
+    <div class="queue">${displayRows.length ? displayRows.map(verifyCard).join("") : '<div class="empty">Nothing to show here.</div>'}</div>`;
     $("[data-filter]", body).addEventListener("change", e => tabVerify(body, e.target.value).catch(err => body.innerHTML = errorBox(err)));
     $("[data-refresh]", body).addEventListener("click", () => tabVerify(body, filter).catch(err => body.innerHTML = errorBox(err)));
     $$("a[data-ref]", body).forEach(a => AU.signedUrl(a.dataset.ref).then(u => { if (u) a.href = u; else { a.textContent = "File unavailable"; a.removeAttribute("href"); } }));
@@ -469,10 +481,20 @@
   function verifyCard(v) {
     const snap = Object.entries(v.item_snapshot || {}).filter(([, val]) => val).map(([k, val]) => `<dt>${safe(FIELD_LABELS[k] || k)}</dt><dd>${safe(val)}</dd>`).join("");
     const ev = (v.evidence || []).map((r, i) => `<a data-ref="${safe(r)}" href="#" target="_blank" rel="noopener noreferrer">Evidence ${i + 1}</a>`).join("");
+    let externalSource = "";
+    if (typeof v.iads_source_url === "string") {
+      try {
+        const source = new URL(v.iads_source_url);
+        if (source.protocol === "https:") {
+          externalSource = `<a href="${safe(source.href)}" target="_blank" rel="noopener noreferrer">External source</a>`;
+        }
+      } catch {}
+    }
+    const evidence = [ev, externalSource].filter(Boolean).join(" ");
     const state = { pending: ["Pending", "warn"], verified: ["Verified", "ok"], rejected: ["Not verified", "bad"] }[v.status];
     return `<article class="queue-card" data-id="${safe(v.id)}"><header>${badge(TYPE_LABEL[v.item_type] || v.item_type, "info")}<h3>${safe(v.item_title)}</h3>${badge(state[0], state[1])}
       <p class="sub">${safe(v.student_name)} · ${safe(v.student_number)} · requested ${safe(fmtDate(v.created_at))}</p></header>
-      <dl class="kv">${snap}</dl>${ev ? `<div class="evidence">${ev}</div>` : '<p class="muted">No evidence file attached.</p>'}
+      <dl class="kv">${snap}</dl>${evidence ? `<div class="evidence">${evidence}</div>` : '<p class="muted">No evidence file attached.</p>'}
       ${v.status === "pending"
         ? `<div class="actions"><label>Note to student (required if not verified)<textarea rows="2" maxlength="1000"></textarea></label><button class="button" type="button" data-decide="verified">Verify as true</button><button class="button ghost" type="button" data-decide="rejected">Cannot verify</button></div>`
         : `<p class="muted">${v.reviewed_at ? "Decided " + safe(fmtDate(v.reviewed_at)) + "." : ""} ${v.reviewer_note ? "Note: " + safe(v.reviewer_note) : ""}</p>`}</article>`;
