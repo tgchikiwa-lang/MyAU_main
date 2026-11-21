@@ -61,6 +61,13 @@ code{background:#f0edeb;padding:1px 6px;border-radius:4px;font-size:.9em}
 .eyebrow+h1{margin-top:0}
 .muted{color:var(--muted)}
 .form-message.ok{color:var(--ok)}.form-message.err{color:var(--bad)}
+.iads-card{gap:12px}
+.iads-edit-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.iads-edit-form label{display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:700}
+.iads-edit-form input,.iads-edit-form textarea,.iads-edit-form select{width:100%;border:1px solid #cbc4c0;border-radius:5px;background:var(--bg);padding:9px 10px;color:var(--fg)}
+.iads-edit-form label:has(textarea),.iads-edit-form .form-message,.iads-edit-form .card-actions{grid-column:1/-1}
+.iads-edit-form .card-actions{justify-content:flex-start}
+@media(max-width:600px){.iads-edit-form{grid-template-columns:1fr}}
 
 /* navigation: desktop sticky, mobile drawer */
 .sidebar{position:sticky;top:24px;align-self:flex-start;max-height:calc(100vh - 48px);overflow:auto}

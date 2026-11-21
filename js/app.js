@@ -6,7 +6,7 @@ const navItems = [
   ["overview", "Overview"], ["projects", "My Projects"], ["skills", "My Skills"],
   ["academics", "Academics & Certificates"], ["results", "Official Results"],
   ["finance", "Finance"], ["references", "Recommendations"], ["clubs", "Clubs & Activities"],
-  ["professional", "Professional Profile"], ["security", "Account Security"]
+  ["professional", "Professional Profile"], ["iads", "IADS"], ["security", "Account Security"]
 ];
 const pages = {
   overview: ["Overview", "Your Africa University student profile", "Your digital student ID and details in one place."],
@@ -18,6 +18,7 @@ const pages = {
   references: ["Recommendations", "Request a recommendation", "Ask a lecturer or supervisor for a recommendation. The request goes to the Records Office, who coordinate it with your referee."],
   clubs: ["Clubs & Activities", "Share your university community involvement", "Add clubs, associations and activities, with pictures."],
   professional: ["Professional Profile", "Prepare your professional profile and CV", "Link your GitHub and LinkedIn, and keep your CV ready to download."],
+  iads: ["Achievement review", "IADS", "Submit a certificate or source URL, review the achievement details, then accept or decline."],
   security: ["Account Security", "Manage your account and profile backup", "Keep your account secure and export a backup of your profile."],
   admin: ["Student accounts", "Administration", "Administrator console."],
   "admin-profile": ["Administrator profile", "Administration", "Administrator profile access requires the protected server functions."],
@@ -41,6 +42,7 @@ const IDLE_MS = 30 * 60 * 1000;
 let supabasePromise;
 let student;
 let profileData;
+let profileUpdatedAt;
 let saveInProgress = false;
 let verifications = [];
 let verificationsReady = true;
@@ -51,6 +53,7 @@ let recRows = [], recReady = true;
 let shareRows = [], sharingReady = true;
 let shareCandidates = [];
 let changeRequests = [], achievementHistory = [], historyReady = true;
+let iadsCandidates = [], iadsReady = true;
 let pageNote = "";
 let globalsBound = false;
 const urlCache = new Map();
@@ -93,12 +96,15 @@ const DOCS = ["application/pdf", "application/msword", "application/vnd.openxmlf
 async function signedUrl(ref, options) {
   if (typeof ref !== "string" || !ref.startsWith("storage://")) return "";
   const path = ref.slice(10);
-  const hit = urlCache.get(path);
+  const bucket = path.split("/")[1] === "iads-evidence" ? "iads-evidence" : "student-content";
+  const cacheKey = `${bucket}:${path}`;
+  const hit = urlCache.get(cacheKey);
   if (!options && hit && hit.exp > Date.now()) return hit.url;
   const client = await getSupabase();
-  const { data, error } = await client.storage.from("student-content").createSignedUrl(path, 3600, options);
+  const expiresIn = bucket === "iads-evidence" ? 300 : 3600;
+  const { data, error } = await client.storage.from(bucket).createSignedUrl(path, expiresIn, options);
   if (error || !data) return "";
-  if (!options) urlCache.set(path, { url: data.signedUrl, exp: Date.now() + 50 * 60 * 1000 });
+  if (!options) urlCache.set(cacheKey, { url: data.signedUrl, exp: Date.now() + (expiresIn - 30) * 1000 });
   return data.signedUrl;
 }
 
@@ -185,13 +191,14 @@ async function loadStudentProfile() {
   student = auth.user;
 
   const { data: row, error } = await client.from("profiles")
-    .select("data").eq("id", student.id).maybeSingle();
+    .select("data,updated_at").eq("id", student.id).maybeSingle();
   if (error) {
     const code = error.code ? ` (${error.code})` : "";
     throw new Error(`Could not load your cloud profile${code}: ${error.message}`);
   }
   if (row) {
     profileData = mergeProfileData(row.data, student);
+    profileUpdatedAt = row.updated_at;
   } else {
     const initialData = emptyProfileData(student);
     const { error: insertError } = await client.from("profiles").upsert(
@@ -207,7 +214,7 @@ async function loadStudentProfile() {
     }
 
     const { data: created, error: reloadError } = await client.from("profiles")
-      .select("data").eq("id", student.id).maybeSingle();
+      .select("data,updated_at").eq("id", student.id).maybeSingle();
     if (reloadError) {
       const code = reloadError.code ? ` (${reloadError.code})` : "";
       throw new Error(`Profile creation succeeded, but the cloud profile could not be reloaded${code}: ${reloadError.message}`);
@@ -216,6 +223,7 @@ async function loadStudentProfile() {
       throw new Error("Profile creation did not return a readable profile. Apply migration 0007 and verify the owner-scoped profiles RLS policies.");
     }
     profileData = mergeProfileData(created.data, student);
+    profileUpdatedAt = created.updated_at;
   }
   if (student.email) profileData.profile.email = student.email;
 
@@ -228,13 +236,26 @@ async function loadStudentProfile() {
   return true;
 }
 
+async function reloadProfileSnapshot() {
+  const client = await getSupabase();
+  const { data: row, error } = await client.from("profiles")
+    .select("data,updated_at").eq("id", student.id).maybeSingle();
+  if (error) throw new Error(`Could not refresh your profile: ${error.message}`);
+  if (!row) throw new Error("Your profile is no longer available. Reload and sign in again.");
+  profileData = mergeProfileData(row.data, student);
+  profileUpdatedAt = row.updated_at;
+}
+
 async function persistProfile(next) {
   const client = await getSupabase();
-  const { data, error } = await client.from("profiles").update({ data: next, updated_at: new Date().toISOString() })
-    .eq("id", student.id).select("id").maybeSingle();
+  const { data, error } = await client.rpc("au_save_profile_data", {
+    p_data: next,
+    p_expected_updated_at: profileUpdatedAt,
+  });
   if (error) throw new Error(`Cloud profile save failed: ${error.message}`);
-  if (!data) throw new Error("Cloud profile was not updated. Account access may have changed; reload and retry.");
+  if (typeof data !== "string") throw new Error("Profile save returned an invalid revision. Reload and retry.");
   profileData = next;
+  profileUpdatedAt = data;
   setStatus("Your profile is synced with Supabase.");
 }
 
@@ -331,11 +352,27 @@ async function loadOfficialResults() {
   officialResultsReady = true;
   officialResults = data || [];
 }
+async function loadIadsCandidates() {
+  const client = await getSupabase();
+  const { data, error } = await client.from("iads_candidates").select("*")
+    .order("created_at", { ascending: false }).limit(50);
+  if (error) {
+    if (tableMissing(error)) {
+      iadsReady = false;
+      iadsCandidates = [];
+      return;
+    }
+    throw error;
+  }
+  iadsReady = true;
+  iadsCandidates = data || [];
+}
 async function loadPageData() {
   try {
     if (["projects", "academics", "clubs", "professional", "references"].includes(key)) await loadVerifications();
     if (key === "finance") await loadFinance();
     if (key === "results") await loadOfficialResults();
+    if (key === "iads") await loadIadsCandidates();
     if (key === "references") {
       await Promise.all([loadRecommendations(), loadShareCandidates()]);
     }
@@ -478,12 +515,22 @@ function verifyBadge(info) {
   }
 }
 
-async function requestVerification(name, id, { refresh = true } = {}) {
+async function requestVerification(name, id, { refresh = true, requestId = crypto.randomUUID() } = {}) {
   const cfg = COLLECTIONS[name];
   const rec = profileData[cfg.store].find(r => r.id === id);
   const p = profileData.profile;
   if (!rec) throw new Error("This item could not be found in your saved profile. Reload and try again.");
   if (!p.name || !p.studentId) throw new Error("Add your full name and student ID on the Overview page first, so Records can find you.");
+  if (name === "achievements") {
+    const client = await getSupabase();
+    const { data, error } = await client.rpc("au_request_achievement_verification", {
+      p_request_id: requestId,
+      p_item_id: id,
+    });
+    if (error) throw new Error(`Could not submit the achievement: ${error.message}`);
+    if (refresh) await loadVerifications();
+    return data?.outcome === "submitted";
+  }
   const snapshot = {};
   for (const f of cfg.hash) snapshot[f] = rec[f] ?? "";
   const evidence = [rec.file, ...(rec.photos || [])].filter(Boolean);
@@ -575,11 +622,25 @@ function hydrateFiles(root) {
 async function addRecord(name, form) {
   const cfg = COLLECTIONS[name];
   const fd = new FormData(form);
-  const rec = { id: crypto.randomUUID() };
+  const rec = { id: name === "achievements"
+    ? (form.dataset.achievementId || (form.dataset.achievementId = crypto.randomUUID()))
+    : crypto.randomUUID() };
   for (const [f, label, type, opt = {}] of cfg.fields) {
     if (type === "file") {
       const file = fd.get(f);
-      if (file instanceof File && file.size) rec[f] = await uploadStudentFile(file, { shrinkImage: 1800 });
+      if (file instanceof File && file.size) {
+        if (name === "achievements") {
+          const fingerprint = `${file.name}:${file.size}:${file.lastModified}`;
+          if (form.dataset.fileFingerprint && form.dataset.fileFingerprint !== fingerprint) {
+            throw new Error("This submission already started with another file. Finish it or start a new submission before changing evidence.");
+          }
+          form.dataset.fileFingerprint = fingerprint;
+          rec[f] = form.dataset.achievementFileRef
+            || (form.dataset.achievementFileRef = await uploadStudentFile(file, { maxMB: 5, shrinkImage: 1800 }));
+        } else {
+          rec[f] = await uploadStudentFile(file, { shrinkImage: 1800 });
+        }
+      }
     } else if (type === "files") {
       const files = fd.getAll(f).filter(x => x instanceof File && x.size);
       if (files.length > 6) throw new Error("Choose at most 6 pictures at a time.");
@@ -597,6 +658,24 @@ async function addRecord(name, form) {
   }
   if (name === "skills" && profileData.skills.some(s => s.name.toLowerCase() === rec.name.toLowerCase())) {
     throw new Error("You already have that skill listed.");
+  }
+  if (name === "achievements") {
+    if (form.dataset.achievementFileRef) rec.file = form.dataset.achievementFileRef;
+    const client = await getSupabase();
+    const requestId = form.dataset.requestId || crypto.randomUUID();
+    form.dataset.requestId = requestId;
+    const { data, error } = await client.rpc("au_submit_manual_achievement", {
+      p_request_id: requestId,
+      p_achievement: rec,
+    });
+    if (error) throw new Error(`Could not submit the achievement: ${error.message}`);
+    await reloadProfileSnapshot();
+    await loadVerifications();
+    delete form.dataset.requestId;
+    delete form.dataset.achievementId;
+    delete form.dataset.achievementFileRef;
+    delete form.dataset.fileFingerprint;
+    return data;
   }
   await persistProfile({ ...profileData, [cfg.store]: [rec, ...profileData[cfg.store]] });
 }
@@ -961,6 +1040,7 @@ function pageContent() {
   const warn = pageNote ? `<p class="notice warn" role="alert">${safe(pageNote)}</p>` : "";
   let body = "";
   if (key === "overview") body = overviewContent();
+  else if (key === "iads") body = iadsContent();
   else if (key === "results") body = officialResultsContent();
   else if (key === "professional") body = professionalContent();
   else if (key === "security") body = securityContent();
@@ -976,6 +1056,325 @@ function pageContent() {
   }
   if (["projects", "academics", "clubs"].includes(key)) body += achievementHistoryContent();
   return `${head}${warn}${body}`;
+}
+
+function iadsContent() {
+  if (!iadsReady) {
+    return `<div class="notice warn"><strong>IADS is not installed yet</strong><p>Ask an administrator to apply migrations <code>0016_achievement_mutation_boundary.sql</code> and <code>0017_iads_mvp.sql</code>, then deploy the <code>iads-evidence</code> Edge Function.</p></div>`;
+  }
+  const form = `<section class="saved-items"><h2>Submit an achievement</h2>
+    <p class="muted">Upload a PDF, JPEG, PNG, or WebP certificate (maximum 5 MB), or provide an external HTTPS source. Your achievement is added to your profile only after you accept it.</p>
+    <form class="data-form wide" data-iads-create>
+      <label>Achievement title<input name="title" maxlength="160" required></label>
+      <label>Category<select name="category" required>
+        <option value="">Choose a category</option>
+        ${["Academic","Leadership","Research","Community Service","Sports","Arts & Culture","Other"].map(v => `<option>${safe(v)}</option>`).join("")}
+      </select></label>
+      <label>Date<input name="date" type="text" maxlength="40" placeholder="For example, 2025"></label>
+      <label>Issuer<input name="issuer" maxlength="160"></label>
+      <label class="full">Description<textarea name="description" maxlength="800" rows="3"></textarea></label>
+      <label>Certificate file<input name="evidence" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp"></label>
+      <label>External HTTPS URL<input name="source_url" type="url" maxlength="2048" placeholder="https://"></label>
+      <button class="button" type="submit">Continue to review</button>
+      <p class="form-message" aria-live="polite"></p>
+    </form>
+  </section>
+  <section class="saved-items wide"><h2>Your IADS submissions</h2>
+    <div class="card-grid">${iadsCandidates.length ? iadsCandidates.map(iadsCandidateCard).join("") : '<p class="empty">No IADS submissions yet.</p>'}</div>
+  </section>`;
+  return form;
+}
+
+function iadsCandidateCard(candidate) {
+  const state = {
+    awaiting_evidence: ["Evidence needed", "warn"],
+    awaiting_review: ["Ready for your review", "info"],
+    accepted: ["Submitted to Records · pending verification", "warn"],
+    declined: ["Declined", ""],
+    duplicate: ["Duplicate · no new achievement added", "bad"],
+  }[candidate.status] || ["Status unavailable", "bad"];
+  const fields = `<label>Title<input name="title" maxlength="160" required value="${safe(candidate.title)}"></label>
+    <label>Category<select name="category" required>${["Academic","Leadership","Research","Community Service","Sports","Arts & Culture","Other"].map(v => `<option${v === candidate.category ? " selected" : ""}>${safe(v)}</option>`).join("")}</select></label>
+    <label>Date<input name="date" maxlength="40" value="${safe(candidate.date)}"></label>
+    <label>Issuer<input name="issuer" maxlength="160" value="${safe(candidate.issuer)}"></label>
+    <label class="full">Description<textarea name="description" maxlength="800" rows="3">${safe(candidate.description)}</textarea></label>`;
+  const source = candidate.source_kind === "url"
+    ? `<p>Source: <a href="${safe(candidate.source_url)}" target="_blank" rel="noopener noreferrer">${safe(candidate.source_url)}</a></p>`
+    : candidate.canonical_storage_ref
+      ? `<p>Private certificate evidence validated. <a data-file-ref="${safe(candidate.canonical_storage_ref)}" href="#" target="_blank" rel="noopener noreferrer">Open certificate</a></p>`
+      : `<p>Private certificate evidence is being prepared.</p>`;
+  const form = candidate.status === "awaiting_review"
+    ? `<form data-iads-edit="${safe(candidate.id)}" data-updated-at="${safe(candidate.updated_at)}" class="iads-edit-form">
+        ${fields}<p class="form-message" aria-live="polite"></p>
+        <div class="card-actions">
+          <button class="button ghost small" type="submit" data-save-iads>Save corrections</button>
+          <button class="button small" type="button" data-accept-iads="${safe(candidate.id)}">Accept &amp; add to profile</button>
+          <button class="text-button danger" type="button" data-decline-iads="${safe(candidate.id)}">Decline</button>
+        </div>
+      </form>`
+    : candidate.status === "awaiting_evidence"
+      ? `<form data-iads-resume="${safe(candidate.id)}" class="iads-edit-form">
+          <p>Upload the source certificate to finish validation. If the object already exists, it will be checked and never overwritten.</p>
+          <label>Certificate file<input name="evidence" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp" required></label>
+          <p class="form-message" aria-live="polite"></p>
+          <button class="button small" type="submit">Validate evidence</button>
+          <button class="text-button danger" type="button" data-decline-iads="${safe(candidate.id)}">Decline</button>
+        </form>`
+      : candidate.status === "accepted"
+        ? `<p>The achievement is in your profile and awaiting Records review.</p>`
+        : candidate.status === "declined" ? `<p>You declined this submission.</p>` : `<p>No profile entry or verification was created.</p>`;
+  return `<article class="saved-card iads-card" data-iads-card="${safe(candidate.id)}">
+    <div class="verify-line"><span class="badge ${state[1]}">${safe(state[0])}</span></div>
+    <h3>${safe(candidate.title)}</h3>${source}${form}
+  </article>`;
+}
+
+async function callIadsEvidence(action, candidateId) {
+  const client = await getSupabase();
+  const { data, error } = await client.functions.invoke("iads-evidence", {
+    body: { action, candidate_id: candidateId },
+  });
+  if (error) throw new Error(`Evidence validation failed: ${error.message}`);
+  if (data?.error) throw new Error(String(data.error));
+  return data || {};
+}
+
+async function uploadIadsSource(candidateId, file) {
+  if (!(file instanceof File) || !file.size) throw new Error("Choose the certificate file.");
+  if (file.size > 5 * 1024 * 1024) throw new Error("Certificates must be 5 MB or smaller.");
+  const allowedTypes = ["application/pdf", "image/jpeg", "image/png", "image/webp"];
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  const fallbackType = {
+    pdf: "application/pdf",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    webp: "image/webp",
+  }[extension];
+  const contentType = allowedTypes.includes(file.type) ? file.type : fallbackType;
+  if (!contentType) throw new Error("Choose a PDF, JPEG, PNG, or WebP certificate.");
+  const client = await getSupabase();
+  const sourceRef = `storage://${student.id}/iads-source/${candidateId}`;
+  const { error: attachError } = await client.rpc("iads_attach_source", {
+    p_candidate_id: candidateId,
+    p_source_ref: sourceRef,
+  });
+  if (attachError) {
+    const { data: candidate, error: stateError } = await client.from("iads_candidates")
+      .select("student_id,status").eq("id", candidateId).maybeSingle();
+    if (stateError) {
+      throw new Error(`The source file could not be attached: ${attachError.message}. Candidate state could not be verified: ${stateError.message}`);
+    }
+    if (candidate?.student_id === student.id && candidate.status === "awaiting_review") {
+      await loadIadsCandidates();
+      return { outcome: "validated", candidate_id: candidateId };
+    }
+    throw new Error(`The source file could not be attached: ${attachError.message}`);
+  }
+  const { error: uploadError } = await client.storage.from("student-content").upload(
+    `${student.id}/iads-source/${candidateId}`,
+    file,
+    { contentType, upsert: false },
+  );
+  const result = await callIadsEvidence("validate", candidateId);
+  if (uploadError && result.outcome !== "validated") {
+    throw new Error(`The certificate upload could not be confirmed: ${uploadError.message}`);
+  }
+  return result;
+}
+
+async function iadsFileFingerprint(file) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", await file.arrayBuffer()));
+  return [...digest].map(value => value.toString(16).padStart(2, "0")).join("");
+}
+
+function iadsFormValues(form) {
+  const data = new FormData(form);
+  return {
+    title: valueForForm("title", data),
+    category: valueForForm("category", data),
+    date: valueForForm("date", data),
+    issuer: valueForForm("issuer", data),
+    description: valueForForm("description", data),
+  };
+}
+
+async function submitIadsCandidate(form) {
+  const data = new FormData(form);
+  const fields = iadsFormValues(form);
+  const file = data.get("evidence");
+  const sourceUrl = valueForForm("source_url", data);
+  const hasFile = file instanceof File && file.size > 0;
+  if (hasFile === Boolean(sourceUrl)) {
+    throw new Error("Choose exactly one: a certificate file or an external HTTPS URL.");
+  }
+  if (sourceUrl) {
+    let parsed;
+    try { parsed = new URL(sourceUrl); } catch { throw new Error("Enter a valid external HTTPS URL."); }
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+      throw new Error("External sources must use HTTPS and cannot include embedded credentials.");
+    }
+  }
+  const client = await getSupabase();
+  const requestId = form.dataset.requestId || (form.dataset.requestId = crypto.randomUUID());
+  const evidenceHash = hasFile ? await iadsFileFingerprint(file) : null;
+  const { data: candidateId, error } = await client.rpc("iads_create_candidate", {
+    p_request_id: requestId,
+    p_source_kind: hasFile ? "upload" : "url",
+    p_title: fields.title,
+    p_category: fields.category,
+    p_date: fields.date,
+    p_issuer: fields.issuer,
+    p_description: fields.description,
+    p_source_url: sourceUrl || null,
+    p_evidence_sha256: evidenceHash,
+  });
+  if (error) throw new Error(`Could not create the candidate: ${error.message}`);
+  if (typeof candidateId !== "string") throw new Error("Candidate creation returned an invalid ID.");
+  if (hasFile) {
+    const { data: candidate, error: candidateError } = await client.from("iads_candidates")
+      .select("status").eq("id", candidateId).maybeSingle();
+    if (candidateError) throw new Error(`Candidate status could not be loaded: ${candidateError.message}`);
+    if (!candidate) throw new Error("Candidate was not returned to its owner. Refresh and retry.");
+    if (candidate.status === "awaiting_evidence") await uploadIadsSource(candidateId, file);
+  }
+  await loadIadsCandidates();
+  return candidateId;
+}
+
+async function saveIadsCandidate(form, candidateId) {
+  const fields = iadsFormValues(form);
+  const client = await getSupabase();
+  const { data, error } = await client.rpc("iads_update_candidate", {
+    p_candidate_id: candidateId,
+    p_expected_updated_at: form.dataset.updatedAt,
+    p_title: fields.title,
+    p_category: fields.category,
+    p_date: fields.date,
+    p_issuer: fields.issuer,
+    p_description: fields.description,
+  });
+  if (error) throw new Error(`Could not save corrections: ${error.message}`);
+  form.dataset.updatedAt = data;
+  return { fields, updatedAt: data };
+}
+
+async function refreshCompletedIadsCandidate(candidateId) {
+  await loadIadsCandidates();
+  const candidate = iadsCandidates.find(item => item.id === candidateId);
+  if (!candidate || !["accepted", "duplicate"].includes(candidate.status)) return null;
+  if (candidate.status === "accepted") {
+    await reloadProfileSnapshot();
+    await loadVerifications();
+  }
+  return { outcome: candidate.status, verification_id: candidate.verification_id };
+}
+
+async function acceptIadsCandidate(candidateId, form) {
+  let candidate = iadsCandidates.find(item => item.id === candidateId);
+  if (!candidate) throw new Error("Candidate not found. Refresh and retry.");
+  if (candidate.status === "accepted" || candidate.status === "duplicate") {
+    const completed = await refreshCompletedIadsCandidate(candidateId);
+    if (completed) return completed;
+    throw new Error("The candidate outcome could not be confirmed. Refresh and retry.");
+  }
+  let saved;
+  try {
+    saved = await saveIadsCandidate(form, candidateId);
+  } catch (error) {
+    const completed = await refreshCompletedIadsCandidate(candidateId);
+    if (completed) return completed;
+    throw error;
+  }
+  let data;
+  try {
+    let receiptId = null;
+    if (candidate.source_kind === "upload") {
+      const receipt = await callIadsEvidence("accept", candidateId);
+      if (receipt.outcome !== "accepted") receiptId = receipt.receipt_id;
+    }
+    const client = await getSupabase();
+    const { data: result, error } = await client.rpc("iads_accept_candidate", {
+      p_candidate_id: candidateId,
+      p_accept_receipt_id: receiptId,
+      p_expected_updated_at: saved.updatedAt,
+    });
+    if (error) throw new Error(`Could not accept this achievement: ${error.message}`);
+    data = result;
+  } catch (error) {
+    const completed = await refreshCompletedIadsCandidate(candidateId);
+    if (completed) return { ...completed, fields: saved.fields };
+    throw error;
+  }
+  await reloadProfileSnapshot();
+  await loadVerifications();
+  await loadIadsCandidates();
+  return { ...data, fields: saved.fields };
+}
+
+async function declineIadsCandidate(candidateId) {
+  const client = await getSupabase();
+  const { data, error } = await client.rpc("iads_decline_candidate", {
+    p_candidate_id: candidateId,
+  });
+  if (error) throw new Error(`Could not decline this candidate: ${error.message}`);
+  await loadIadsCandidates();
+  return data;
+}
+
+function bindIads(root) {
+  const createForm = $("[data-iads-create]", root);
+  if (createForm) createForm.addEventListener("submit", async event => {
+    event.preventDefault();
+    const ok = await withForm(createForm, () => submitIadsCandidate(createForm), "Candidate added for your review.");
+    if (ok) {
+      createForm.reset();
+      delete createForm.dataset.requestId;
+      drawStudentContent();
+    }
+  });
+  $$("[data-iads-resume]", root).forEach(form => form.addEventListener("submit", async event => {
+    event.preventDefault();
+    const candidateId = form.dataset.iadsResume;
+    const file = new FormData(form).get("evidence");
+    const ok = await withForm(form, () => uploadIadsSource(candidateId, file), "Evidence validated.");
+    if (ok) drawStudentContent();
+  }));
+  $$("[data-iads-edit]", root).forEach(form => form.addEventListener("submit", async event => {
+    event.preventDefault();
+    const candidateId = form.dataset.iadsEdit;
+    const ok = await withForm(form, () => saveIadsCandidate(form, candidateId), "Corrections saved.");
+    if (ok) {
+      await loadIadsCandidates();
+      drawStudentContent();
+    }
+  }));
+  $$("[data-accept-iads]", root).forEach(button => button.addEventListener("click", async () => {
+    const card = button.closest("[data-iads-card]");
+    const form = $("[data-iads-edit]", card);
+    if (!form) return;
+    button.disabled = true;
+    try {
+      const result = await acceptIadsCandidate(button.dataset.acceptIads, form);
+      toast(result.outcome === "accepted"
+        ? "Achievement added to your profile and sent to Records for verification."
+        : "An exact achievement already exists; no duplicate was added.", result.outcome === "duplicate");
+      drawStudentContent();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "The achievement could not be accepted.", true);
+      button.disabled = false;
+    }
+  }));
+  $$("[data-decline-iads]", root).forEach(button => button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      await declineIadsCandidate(button.dataset.declineIads);
+      drawStudentContent();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "The candidate could not be declined.", true);
+      button.disabled = false;
+    }
+  }));
 }
 
 function homeContent() {
@@ -1190,7 +1589,12 @@ function drawStudentContent() {
   $$("[data-add]").forEach(form => form.addEventListener("submit", async event => {
     event.preventDefault();
     const name = form.dataset.add;
-    if (await withForm(form, () => addRecord(name, form), name === "projects" ? "Project added." : "Added.")) {
+    const success = result => name === "achievements"
+      ? result?.outcome === "submitted"
+        ? "Achievement added and sent to the Records Office for verification."
+        : "An exact achievement already exists; no duplicate was added."
+      : name === "projects" ? "Project added." : "Added.";
+    if (await withForm(form, () => addRecord(name, form), success)) {
       form.reset();
       await renderItems(name);
       if (name === "projects") {
@@ -1224,7 +1628,9 @@ function drawStudentContent() {
         const [n, id] = vf.dataset.verify.split(":");
         vf.disabled = true;
         try {
-          const submitted = await requestVerification(n, id);
+          const requestId = vf.dataset.requestId || crypto.randomUUID();
+          vf.dataset.requestId = requestId;
+          const submitted = await requestVerification(n, id, { requestId });
           await renderItems(n);
           toast(submitted ? "Sent to the Records Office for verification." : "This item is already in the Records queue.");
         }
@@ -1407,6 +1813,7 @@ function drawStudentContent() {
     }
   });
   $$("[data-export]").forEach(b => b.addEventListener("click", exportProfile));
+  if (key === "iads") bindIads(app);
 }
 
 async function start() {

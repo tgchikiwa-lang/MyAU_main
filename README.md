@@ -69,6 +69,70 @@ Student achievements include the university-approved category (Academic, Leaders
 Service, Sports, Arts & Culture, Other), date, issuer, and description. Existing achievements remain visible;
 their old verification remains recognized until a Records-reviewed change or a new verification request.
 
+## Local review and IADS preview
+
+This repository is a static site; it has no `package.json` build or local backend. From the repository root,
+serve it with Python:
+
+```powershell
+python -m http.server 8000 --bind 127.0.0.1
+```
+
+Open `http://127.0.0.1:8000/` for the landing page. The signed-in IADS page is
+`http://127.0.0.1:8000/pages/iads.html`; it requires a valid Supabase session and the IADS backend described
+below. The signed-in portal navigation includes IADS.
+
+For an offline group walkthrough, open
+`http://127.0.0.1:8000/pages/iads-preview.html`. This opt-in, read-only page uses fictional sample content,
+has inert controls, and loads no application or Supabase JavaScript. It cannot create or submit records. It
+demonstrates the IADS layout only, not the live workflow.
+
+The browser configuration is already present in `js/config.js`; no `.env` file or build step is used by the
+static preview. The actual workflow connects to the configured Supabase project. Do not open its signed-in
+route for an offline-only demonstration. For interactive local testing, use a team staging project; never
+point the student UI at production.
+
+## IADS MVP
+
+IADS is available from the signed-in student navigation. Certificate uploads use the existing private
+`student-content` bucket as the student-owned source and a separate private `iads-evidence` bucket for the
+canonical copy. External HTTPS URLs are stored only as provenance; verification evidence contains only
+private `storage://` references. Accepted achievements use the existing pending `verifications` workflow.
+Staff review remains in the existing Records queue; authorized reviewers see an external source link from
+the protected provenance record or a short-lived signed URL for canonical evidence.
+
+Before applying the additive IADS migrations, reconcile the live Supabase migration ledger with the live
+catalog; the local migration filenames do not prove which migrations are deployed. Apply
+`backend/migrations/0016_achievement_mutation_boundary.sql` and then
+`backend/migrations/0017_iads_mvp.sql` only after their preflight blocks pass. Do not edit or rerun earlier
+MyAU migrations to make the IADS migration pass. The migrations abort on incompatible profiles,
+verification objects, triggers, authorization helpers, Storage setup, cryptographic extension, or role
+attributes.
+
+The database migration creates an empty private HMAC key table and the non-login `iads_receipt_owner` role.
+Before deploying `supabase/functions/iads-evidence`, provision one random 32-byte HMAC key through an
+approved protected operations channel: store it in `iads_private.hmac_keys` as the matching key ID and
+provide the same key ID and base64-encoded key to the Edge Function as
+`IADS_HMAC_KEY_ID` and `IADS_HMAC_KEY_B64`. Also configure the function's normal Supabase URL, anon key,
+and server-side service-role key. Never put key material in this repository, a migration, browser config,
+or a browser request; never use the service-role client for Storage. The function validates Storage bytes
+through the student's JWT and uses its service-role client only for the signed receipt RPC.
+
+Deploy the Edge Function only after applying both migrations and provisioning the same key on each side.
+Until that configuration exists, evidence validation fails closed. Keep canonical evidence and abandoned
+candidate copies until an institutional retention period is approved; do not enable automatic object cleanup.
+The profile mutation RPCs serialize achievement writes and reject stale full-profile saves so IADS acceptance
+cannot silently overwrite a concurrent MyAU save.
+
+Do not apply these migrations to production before the staging migrations, receipt/Storage authorization,
+concurrency, and workflow tests have passed. A local static preview does not validate any backend behavior.
+
+Validate the hash implementation in an isolated staging database with
+`node tests/iads-hash-vectors.mjs` after applying migration 0016 there. Before production, also test concurrent
+manual/IADS submissions for one student, idempotency-key reuse with identical and changed inputs, receipt
+expiry/replay, service-role denial of private key/table access, student Storage ownership and immutability,
+staff MFA/scoped evidence access, and that recommendation eligibility remains limited to verified items.
+
 The Records console includes a queue for verified-achievement correction/deletion requests. Direct edits and
 removals of unchanged verified projects, achievements, and clubs are blocked. Approved changes supersede the
 old verification and are recorded in the student's history.
